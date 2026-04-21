@@ -1,19 +1,37 @@
 const Stripe = require('stripe');
 
-exports.handler = async (event) => {
+// Vercel buffers the body by default, but Stripe needs the raw body to verify
+// the signature. This config disables body parsing so we get the raw stream.
+export const config = { api: { bodyParser: false } };
+
+async function getRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method Not Allowed' });
+  }
+
   const stripe = Stripe(process.env.STRIPE_SECRET_KEY);
-  const sig = event.headers['stripe-signature'];
+  const sig = req.headers['stripe-signature'];
+  const rawBody = await getRawBody(req);
 
   let stripeEvent;
   try {
     stripeEvent = stripe.webhooks.constructEvent(
-      event.body,
+      rawBody,
       sig,
       process.env.STRIPE_WEBHOOK_SECRET
     );
   } catch (err) {
     console.error('Webhook signature failed:', err.message);
-    return { statusCode: 400, body: `Webhook Error: ${err.message}` };
+    return res.status(400).send(`Webhook Error: ${err.message}`);
   }
 
   switch (stripeEvent.type) {
@@ -32,9 +50,5 @@ exports.handler = async (event) => {
       console.log('Unhandled event:', stripeEvent.type);
   }
 
-  return {
-    statusCode: 200,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ received: true }),
-  };
-};
+  return res.status(200).json({ received: true });
+}

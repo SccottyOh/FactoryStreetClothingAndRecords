@@ -475,7 +475,7 @@ function CheckoutPage({ cart, records, clearCart, go }) {
     setPaymentReady(false);
     (async () => {
       try {
-        const res = await fetch('/.netlify/functions/create-payment-intent', {
+        const res = await fetch('/api/create-payment-intent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
