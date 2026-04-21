@@ -442,16 +442,111 @@ function CartPage({ cart, records, setQty, removeFromCart, go }) {
   );
 }
 
-// ─── Checkout ────────────────────────────────────────────────
+// ─── Checkout ────────────────────────────────────────────
+// ↓ Replace with your Publishable Key from dashboard.stripe.com/apikeys
+const STRIPE_PUBLISHABLE_KEY = 'pk_test_REPLACE_WITH_YOUR_KEY';
+
+const COUNTRY_CODES = {
+  'United States': 'US', 'Canada': 'CA', 'United Kingdom': 'GB',
+  'Japan': 'JP', 'Germany': 'DE', 'Other': 'US',
+};
+
 function CheckoutPage({ cart, records, clearCart, go }) {
   const [step, setStep] = uS(1);
   const lines = cart.map(ci => ({ ...ci, record: records.find(r => r.id === ci.id) })).filter(l => l.record);
   const subtotal = lines.reduce((s, l) => s + l.record.price * l.qty, 0);
-  const shipping = subtotal > 80 ? 0 : 12;
+  const [form, setForm] = uS({ email: '', name: '', addr: '', city: '', zip: '', country: 'United States', ship: 'standard' });
+  const upd = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const shipping = subtotal > 80 ? 0 : (form.ship === 'express' ? 24 : 12);
   const total = subtotal + shipping;
 
-  const [form, setForm] = uS({ email: '', name: '', addr: '', city: '', zip: '', country: 'United States', ship: 'standard', card: '', exp: '', cvc: '' });
-  const upd = (k) => (e) => setForm(f => ({ ...f, [k]: e.target.value }));
+  const [stripeInstance, setStripeInstance] = uS(null);
+  const [stripeElements, setStripeElements] = uS(null);
+  const [paymentReady, setPaymentReady] = uS(false);
+  const [paymentError, setPaymentError] = uS(null);
+  const [paymentLoading, setPaymentLoading] = uS(false);
+  const paymentRef = uR(null);
+  const stripeInitialized = uR(false);
+
+  uE(() => {
+    if (step !== 3 || stripeInitialized.current) return;
+    stripeInitialized.current = true;
+    setPaymentError(null);
+    setPaymentReady(false);
+    (async () => {
+      try {
+        const res = await fetch('/.netlify/functions/create-payment-intent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            amount: Math.round(total * 100),
+            metadata: { customer_name: form.name, customer_email: form.email },
+          }),
+        });
+        if (!res.ok) throw new Error('Server error');
+        const { clientSecret } = await res.json();
+        const stripe = window.Stripe(STRIPE_PUBLISHABLE_KEY);
+        const els = stripe.elements({
+          clientSecret,
+          appearance: {
+            theme: 'night',
+            variables: {
+              colorPrimary: 'oklch(0.74 0.11 75)', colorBackground: '#13110f',
+              colorText: '#f4ede3', colorDanger: '#c0392b',
+              fontFamily: '"Newsreader", Georgia, serif', borderRadius: '0px', spacingUnit: '4px',
+            },
+            rules: {
+              '.Input': { border: 'none', borderBottom: '1px solid rgba(244,237,227,0.28)', boxShadow: 'none', backgroundColor: 'transparent', paddingLeft: '0', color: '#f4ede3' },
+              '.Input:focus': { borderColor: 'oklch(0.74 0.11 75)', boxShadow: 'none' },
+              '.Label': { fontFamily: '"JetBrains Mono", monospace', fontSize: '10px', letterSpacing: '0.15em', textTransform: 'uppercase', color: 'rgba(244,237,227,0.62)' },
+              '.Tab': { borderRadius: '0', border: '1px solid rgba(244,237,227,0.14)', backgroundColor: '#13110f', color: 'rgba(244,237,227,0.62)' },
+              '.Tab--selected': { borderColor: 'oklch(0.74 0.11 75)', color: '#f4ede3', backgroundColor: 'transparent' },
+              '.Tab:hover': { color: '#f4ede3' },
+            },
+          },
+        });
+        setStripeInstance(stripe);
+        setStripeElements(els);
+        const paymentEl = els.create('payment');
+        paymentEl.on('ready', () => setPaymentReady(true));
+        paymentEl.mount(paymentRef.current);
+      } catch (err) {
+        stripeInitialized.current = false;
+        setPaymentError('Could not load the payment form. Please go back and try again.');
+      }
+    })();
+  }, [step]);
+
+  const handleBack = () => {
+    if (step === 3) {
+      stripeInitialized.current = false;
+      setStripeInstance(null); setStripeElements(null);
+      setPaymentReady(false); setPaymentError(null);
+    }
+    setStep(s => s - 1);
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (step < 3) { setStep(s => s + 1); return; }
+    if (!stripeInstance || !stripeElements || !paymentReady) return;
+    setPaymentLoading(true);
+    setPaymentError(null);
+    const { error } = await stripeInstance.confirmPayment({
+      elements: stripeElements,
+      confirmParams: {
+        payment_method_data: {
+          billing_details: {
+            name: form.name, email: form.email,
+            address: { line1: form.addr, city: form.city, postal_code: form.zip, country: COUNTRY_CODES[form.country] || 'US' },
+          },
+        },
+      },
+      redirect: 'if_required',
+    });
+    if (error) { setPaymentError(error.message); setPaymentLoading(false); }
+    else { setStep(4); }
+  };
 
   if (step === 4) {
     return (
@@ -476,10 +571,7 @@ function CheckoutPage({ cart, records, clearCart, go }) {
               </div>
             </div>
           ))}
-          <div className="confirm-total">
-            <span>Total</span>
-            <span>${total.toFixed(2)}</span>
-          </div>
+          <div className="confirm-total"><span>Total</span><span>${total.toFixed(2)}</span></div>
         </div>
         <button className="btn-primary" onClick={() => { clearCart(); go({ name: 'home' }); }}>Back to the shop →</button>
       </div>
@@ -494,15 +586,13 @@ function CheckoutPage({ cart, records, clearCart, go }) {
         <ol className="steps">
           {['Contact', 'Shipping', 'Payment'].map((s, i) => (
             <li key={s} className={step === i + 1 ? 'active' : step > i + 1 ? 'done' : ''}>
-              <span className="step-n">0{i + 1}</span>
-              <span>{s}</span>
+              <span className="step-n">0{i + 1}</span><span>{s}</span>
             </li>
           ))}
         </ol>
       </header>
-
       <div className="checkout-layout">
-        <form className="checkout-form" onSubmit={(e) => { e.preventDefault(); setStep(step < 3 ? step + 1 : 4); }}>
+        <form className="checkout-form" onSubmit={handleSubmit}>
           {step === 1 && (
             <fieldset>
               <legend className="rule-label">§ 01 — Contact</legend>
@@ -527,18 +617,12 @@ function CheckoutPage({ cart, records, clearCart, go }) {
               <div className="ship-options">
                 <label className={`ship-option ${form.ship === 'standard' ? 'active' : ''}`}>
                   <input type="radio" checked={form.ship === 'standard'} onChange={() => setForm(f => ({ ...f, ship: 'standard' }))} />
-                  <div>
-                    <div className="ship-opt-name">Standard · Tuesday dispatch</div>
-                    <div className="muted">Tracked, 3–7 business days</div>
-                  </div>
+                  <div><div className="ship-opt-name">Standard · Tuesday dispatch</div><div className="muted">Tracked, 3–7 business days</div></div>
                   <div className="ship-opt-price">{shipping === 0 ? 'Free' : `$${shipping}`}</div>
                 </label>
                 <label className={`ship-option ${form.ship === 'express' ? 'active' : ''}`}>
                   <input type="radio" checked={form.ship === 'express'} onChange={() => setForm(f => ({ ...f, ship: 'express' }))} />
-                  <div>
-                    <div className="ship-opt-name">Express · Next-day dispatch</div>
-                    <div className="muted">Priority, 1–3 business days</div>
-                  </div>
+                  <div><div className="ship-opt-name">Express · Next-day dispatch</div><div className="muted">Priority, 1–3 business days</div></div>
                   <div className="ship-opt-price">$24</div>
                 </label>
               </div>
@@ -547,20 +631,21 @@ function CheckoutPage({ cart, records, clearCart, go }) {
           {step === 3 && (
             <fieldset>
               <legend className="rule-label">§ 03 — Payment</legend>
-              <label><span>Card number</span><input required value={form.card} onChange={upd('card')} placeholder="0000 0000 0000 0000" /></label>
-              <div className="row-2">
-                <label><span>Expires</span><input required value={form.exp} onChange={upd('exp')} placeholder="MM/YY" /></label>
-                <label><span>CVC</span><input required value={form.cvc} onChange={upd('cvc')} placeholder="123" /></label>
-              </div>
-              <div className="secure-note">
-                <span className="rule-label muted">Payment is tokenized. We never see your card.</span>
+              {!paymentReady && !paymentError && (
+                <div className="payment-loading"><span className="rule-label muted">Loading payment form…</span></div>
+              )}
+              <div ref={paymentRef} id="payment-element" style={{ display: paymentReady ? 'block' : 'none', paddingTop: '8px' }} />
+              {paymentError && <p className="payment-error">{paymentError}</p>}
+              <div className="secure-note" style={{ marginTop: '20px' }}>
+                <span className="rule-label muted">Payments processed securely by Stripe. We never see your card number.</span>
               </div>
             </fieldset>
           )}
           <div className="checkout-actions">
-            {step > 1 && <button type="button" className="btn-ghost" onClick={() => setStep(step - 1)}><Icon.Back size={14} /> Back</button>}
-            <button type="submit" className="btn-primary">
-              {step === 3 ? 'Place order' : 'Continue'} <Icon.Arrow size={14} />
+            {step > 1 && <button type="button" className="btn-ghost" onClick={handleBack}><Icon.Back size={14} /> Back</button>}
+            <button type="submit" className="btn-primary" disabled={step === 3 && (!paymentReady || paymentLoading)}>
+              {step === 3 ? (paymentLoading ? 'Processing…' : 'Place order') : 'Continue'}
+              {!(step === 3 && paymentLoading) && <Icon.Arrow size={14} />}
             </button>
           </div>
         </form>
@@ -589,6 +674,7 @@ function CheckoutPage({ cart, records, clearCart, go }) {
     </div>
   );
 }
+
 
 // ─── Wishlist ────────────────────────────────────────────────
 function WishlistPage({ wishlist, records, audio, onPlay, onOpen, onAdd, onWish, go }) {
